@@ -167,6 +167,12 @@ pw-link -d "${OUT2}" "${IN2}"
 pw-link -d "${OUT3}" "${IN3}"
 EOL
 
+cat > /home/alarm/.asoundrc << 'EOL'
+pcm.hw {
+	rate 48000
+}
+EOL
+
 cat > /home/alarm/.config/systemd/user/es9.service << 'EOL'
 [Unit]
 Description=ES9 link service
@@ -247,7 +253,7 @@ cat > /home/alarm/factories.conf  << 'EOL'
             api.alsa.headroom      = 0
             api.alsa.disable-mmap  = false
             api.alsa.disable-batch = false
-            audio.format           = "S32_LE"
+            audio.format           = "S24_3LE"
             audio.rate             = 48000
             audio.channels         = 4
             audio.position         = "FL,FR,RL,RR"
@@ -264,7 +270,7 @@ cat > /home/alarm/factories.conf  << 'EOL'
             api.alsa.headroom      = 0
             api.alsa.disable-mmap  = false
             api.alsa.disable-batch = false
-            audio.format           = "S32_LE"
+            audio.format           = "S24_3LE"
             audio.rate             = 48000
             audio.channels         = 4
             audio.position         = "FL,FR,RL,RR"
@@ -281,7 +287,7 @@ cat > /home/alarm/factories.conf  << 'EOL'
             api.alsa.headroom      = 0
             api.alsa.disable-mmap  = false
             api.alsa.disable-batch = false
-            audio.format           = "S32_LE"
+            audio.format           = "S24_LE"
             audio.rate             = 48000
             audio.channels         = 16
             #audio.position         = "FL,FR,RL,RR"
@@ -298,7 +304,7 @@ cat > /home/alarm/factories.conf  << 'EOL'
             api.alsa.headroom      = 0
             api.alsa.disable-mmap  = false
             api.alsa.disable-batch = false
-            audio.format           = "S32_LE"
+            audio.format           = "S24_LE"
             audio.rate             = 48000
             audio.channels         = 16
             #audio.position         = "FL,FR,RL,RR"
@@ -336,7 +342,7 @@ cat > /home/alarm/aes67-linux-daemon/daemon/status.json << EOL
     {
       "id": 0,
       "enabled": true,
-      "name": "Synth Source",
+      "name": "Source",
       "io": "Audio Device",
       "max_samples_per_packet": 48,
       "codec": "L24",
@@ -351,11 +357,11 @@ cat > /home/alarm/aes67-linux-daemon/daemon/status.json << EOL
   "sinks": [
     {
       "id": 0,
-      "name": "Synth Sink",
+      "name": "Sink",
       "io": "Audio Device",
       "use_sdp": true,
       "source": "http://${IP}:8080/api/source/sdp/0",
-      "sdp": "v=0\no=- 711797 711798 IN IP4 ${IP}\ns=Synth ${IP_HEX} Synth Source\nc=IN IP4 239.1.0.1/15\nt=0 0\na=clock-domain:PTPv2 0\nm=audio 5004 RTP/AVP 98\nc=IN IP4 239.1.0.1/15\na=rtpmap:98 L24/48000/4\na=sync-time:0\na=framecount:48\na=ptime:1\na=mediaclk:direct=0\na=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\na=recvonly\n",
+      "sdp": "v=0\no=- 711797 711798 IN IP4 ${IP}\ns=Synth ${IP_HEX} Source\nc=IN IP4 239.1.0.1/15\nt=0 0\na=clock-domain:PTPv2 0\nm=audio 5004 RTP/AVP 98\nc=IN IP4 239.1.0.1/15\na=rtpmap:98 L24/48000/4\na=sync-time:0\na=framecount:48\na=ptime:1\na=mediaclk:direct=0\na=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\na=recvonly\n",
       "delay": 384,
       "ignore_refclk_gmid": true,
       "map": [ 0, 1, 2, 3 ]
@@ -413,10 +419,20 @@ history -c -w
 # Disable system log to SD card:
 echo "Storage=none" >> /etc/systemd/journald.conf
 
-# Write log and tmp to ram disk:
-cat >> /etc/fstab << 'EOL'
-tmpfs	/var/log	tmpfs	nodev,nosuid	0	0
-tmpfs	/var/tmp	tmpfs	nodev,nosuid	0	0
+# Set SD card to read-only
+sed -i 's/defaults/defaults,ro,errors=remount-ro/g' /etc/fstab
+
+# Set SD card partitions to read-only, and write log and tmp to ram disk:
+# Root partition is kept at RW for now, so AES67 web interface will be fully functional (adding/removing sources/sinks)
+cat > /etc/fstab << 'EOL'
+# Static information about the filesystems.
+# See fstab(5) for details.
+
+# <file system>		<dir>		<type>	<options>							<dump>	<pass>
+# /dev/mmcblk1p2		/			ext4    defaults,ro,errors=remount-ro		0		0
+/dev/mmcblk1p1		/boot		vfat    defaults,ro,errors=remount-ro		0		0
+tmpfs				/var/log	tmpfs	nodev,nosuid						0		0
+tmpfs				/var/tmp	tmpfs	nodev,nosuid						0		0
 EOL
 
 # Set root partition to read-only:
@@ -427,3 +443,20 @@ cd /boot && ./mkscr && cd -
 
 # Disable loading and saving the system random seed at boot and shutdown
 systemctl disable systemd-random-seed
+
+# Relocate resolv.conf to ramdisk
+ln -sf /var/run/resolv.conf /etc/resolv.conf
+
+# Create scripts to enable/disable write protection
+cat > /home/alarm/writeenable.sh << 'EOL'
+mount -o remount,rw /
+mount -o remount,rw /boot
+EOL
+
+cat > /home/alarm/writedisable.sh << 'EOL'
+mount -o remount,ro /
+mount -o remount,ro /boot
+EOL
+
+chmod +x /home/alarm/writeenable.sh
+chmod +x /home/alarm/writedisable.sh
