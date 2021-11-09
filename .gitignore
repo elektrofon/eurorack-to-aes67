@@ -1,0 +1,49 @@
+# OS generated files #
+######################
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Tags #
+########
+
+TAGS
+.TAGS
+!TAGS/
+tags
+.tags
+!tags/
+gtags.files
+GTAGS
+GRTAGS
+GPATH
+GSYMS
+cscope.files
+cscope.out
+cscope.in.out
+cscope.po.out
+
+# Logs #
+########
+
+*.log
+
+# Node #
+########
+
+node_modules
+
+# Vagrant #
+###########
+
+.vagrant/
+
+# Build #
+#########
+
+release/

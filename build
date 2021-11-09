@@ -1,0 +1,429 @@
+#!/bin/bash -e
+
+IP="192.168.0.254"
+IP_HEX=`printf '%02X' ${IP//./ } | awk '{print tolower($0)}'`
+# We want `IP_HEX` in network byte order
+IP_HEX=${IP_HEX:2:2}${IP_HEX:0:2}${IP_HEX:6:2}${IP_HEX:4:2}
+
+# Set temporary nameserver
+mv /etc/resolv.conf /etc/resolv.conf.tmp
+echo 'nameserver 1.1.1.1' > /etc/resolv.conf
+
+# Set hostname
+echo "synth" > /etc/hostname
+echo "127.0.0.1 localhost.localdomain localhost synth" >> /etc/hosts
+
+# Initialize pacman
+pacman-key --init
+pacman-key --populate archlinuxarm
+
+# System update
+pacman -Syu --noconfirm
+
+# Install packages
+pacman -S --noconfirm \
+	linux-aarch64-headers \
+	base-devel \
+	cmake \
+	clang \
+	git \
+	wget \
+	uboot-tools \
+	boost \
+	avahi \
+	wireplumber \
+	pipewire-alsa \
+	alsa-utils
+
+cat > /etc/systemd/network/eth.network << EOL
+[Match]
+Name=eth*
+
+[Network]
+DHCP=no
+DNSSEC=no
+Address=${IP}/24
+Gateway=0.0.0.0
+DNS=0.0.0.0
+EOL
+
+# Set bashrc variable
+echo "TERM=xterm" >> /home/alarm/.bashrc
+echo "TERM=xterm" >> /root/.bashrc
+
+# Add `alarm` user to the `audio` group. Without this the `alarm` user will not see any alsa devices
+usermod --append --groups audio alarm
+
+mkdir -p /home/alarm/.config/systemd/user/pipewire.service.d
+mkdir -p /home/alarm/.config/pipewire
+chown -R alarm:alarm /home/alarm/.config
+
+git clone --depth 1 --branch master https://github.com/elektrofon/aes67-linux-daemon.git /home/alarm/aes67-linux-daemon
+
+# Patch Ravanne driver Makefile to get the right kernel headers
+cd /home/alarm/aes67-linux-daemon/3rdparty
+
+git clone --single-branch --branch aes67-daemon https://github.com/bondagit/ravenna-alsa-lkm.git
+
+cd /home/alarm/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm
+
+git apply << 'EOL'
+diff --git a/driver/Makefile b/driver/Makefile
+index fadf054..4291920 100644
+--- a/driver/Makefile
++++ b/driver/Makefile
+@@ -7,7 +7,7 @@ obj-m := MergingRavennaALSA.o
+ MergingRavennaALSA-objs := c_wrapper_lib.o audio_driver.o manager.o module_main.o PTP.o module_interface.o module_netlink.o module_timer.o EtherTubeNetfilter.o RTP_streams_manager.o RTP_audio_stream.o RTP_stream.o RTP_stream_info.o MTAL_EthUtils.o MTAL_LKernelAPI.o MTConvert.o
+ 
+ MAKE = make
+-KSRC = /lib/modules/$(shell uname -r)/build/
++KSRC = /lib/modules/$(shell pacman -Q linux-aarch64-headers | sed 's/.* //')-ARCH/build/
+ SRC = $(shell pwd)
+ 
+ modules:
+EOL
+
+cd /home/alarm/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm/driver
+make
+cd /home/alarm
+
+cd /home/alarm/aes67-linux-daemon
+./build.sh
+cd -
+
+cp /home/alarm/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm/driver/MergingRavennaALSA.ko /lib/modules/`pacman -Q 'linux-aarch64-headers' | sed 's/.* //'`-ARCH/kernel/drivers
+
+depmod `pacman -Q 'linux-aarch64-headers' | sed 's/.* //'`-ARCH
+
+# Insmod is not needed right?
+# insmod /home/alarm/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm/driver/MergingRavennaALSA.ko
+
+# Instead of `sysctl -w net/ipv4/igmp_max_memberships=66` call (not working under `systemd-nspawn`):
+echo "net.ipv4.igmp_max_memberships = 66" > /etc/sysctl.d/99-sysctl.conf
+
+echo "MergingRavennaALSA" > /etc/modules-load.d/MergingRavennaALSA.conf
+
+chown -R alarm:alarm /home/alarm/aes67-linux-daemon
+
+# This is not necessary, but an example of how to tag a USB device so that it shows up as in `/dev/` and systemd with a custom name
+# cat > /etc/udev/rules.d/es9.rules << 'EOL'
+# SUBSYSTEM=="usb", ENV{ID_MODEL}=="ES-9", SYMLINK+="es9", TAG+="systemd"
+# EOL
+
+su alarm << 'EOT'
+cat > /home/alarm/link.sh << 'EOL'
+#!/bin/bash
+
+IN0="ravenna:playback_FL"
+IN1="ravenna:playback_FR"
+IN2="ravenna:playback_RL"
+IN3="ravenna:playback_RR"
+
+OUT0="es9:capture_1"
+OUT1="es9:capture_2"
+OUT2="es9:capture_3"
+OUT3="es9:capture_4"
+
+# Wait for AES67 daemon to lock
+IP=$(ip -4 address show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+until /usr/bin/curl http://${IP}:8080/api/ptp/status | grep \"locked\"; do
+        sleep 1
+done
+
+until /usr/bin/pw-link "${OUT0}" "${IN0}"; do
+	sleep .5
+done
+
+until /usr/bin/pw-link "${OUT1}" "${IN1}"; do
+	sleep .5
+done
+
+until /usr/bin/pw-link "${OUT2}" "${IN2}"; do
+	sleep .5
+done
+
+until /usr/bin/pw-link "${OUT3}" "${IN3}"; do
+	sleep .5
+done
+EOL
+
+cat > /home/alarm/unlink.sh << 'EOL'
+#!/bin/bash
+
+IN0="ravenna:playback_FL"
+IN1="ravenna:playback_FR"
+IN2="ravenna:playback_RL"
+IN3="ravenna:playback_RR"
+
+OUT0="es9:capture_1"
+OUT1="es9:capture_2"
+OUT2="es9:capture_3"
+OUT3="es9:capture_4"
+
+pw-link -d "${OUT0}" "${IN0}"
+pw-link -d "${OUT1}" "${IN1}"
+pw-link -d "${OUT2}" "${IN2}"
+pw-link -d "${OUT3}" "${IN3}"
+EOL
+
+cat > /home/alarm/.config/systemd/user/es9.service << 'EOL'
+[Unit]
+Description=ES9 link service
+After=aes67.service
+After=pipewire.service
+After=wireplumber.service
+After=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+After=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+Requires=aes67.service
+Requires=pipewire.service
+Requires=wireplumber.service
+Requisite=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+Requisite=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+BindsTo=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+BindsTo=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+PropagatesStopTo=pipewire.service wireplumber.service pipewire.socket
+
+[Service]
+WorkingDirectory=/home/alarm
+Type=oneshot
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=1
+ExecStart=/home/alarm/link.sh
+ExecStop=/home/alarm/unlink.sh
+StandardOutput=journal
+
+[Install]
+WantedBy=aes67.service
+WantedBy=pipewire.service
+WantedBy=wireplumber.service
+WantedBy=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+WantedBy=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+EOL
+
+cat > /home/alarm/.config/systemd/user/aes67.service << 'EOL'
+[Unit]
+Description=AES67 daemon service
+# After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=1
+WorkingDirectory=/home/alarm/aes67-linux-daemon/daemon
+ExecStart=/home/alarm/aes67-linux-daemon/daemon/aes67-daemon -c daemon.conf
+ExecStartPost=/bin/sleep 5
+
+[Install]
+WantedBy=default.target
+EOL
+
+cat > /home/alarm/.config/systemd/user/pipewire.service.d/override.conf << 'EOL'
+[Unit]
+After=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+After=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+After=aes67.service
+Requires=aes67.service
+Requisite=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+Requisite=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+
+[Install]
+WantedBy=aes67.service
+WantedBy=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
+WantedBy=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+EOL
+
+cat > /home/alarm/factories.conf  << 'EOL'
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.source
+            node.name              = "ravenna"
+            node.description       = "RAVENNA Source"
+            media.class            = "Audio/Source"
+            api.alsa.path          = "plughw:RAVENNA"
+            api.alsa.period-size   = 1024
+            api.alsa.headroom      = 0
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S32_LE"
+            audio.rate             = 48000
+            audio.channels         = 4
+            audio.position         = "FL,FR,RL,RR"
+        }
+    }
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.sink
+            node.name              = "ravenna"
+            node.description       = "RAVENNA Sink"
+            media.class            = "Audio/Sink"
+            api.alsa.path          = "plughw:RAVENNA"
+            api.alsa.period-size   = 1024
+            api.alsa.headroom      = 0
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S32_LE"
+            audio.rate             = 48000
+            audio.channels         = 4
+            audio.position         = "FL,FR,RL,RR"
+        }
+    }
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.source
+            node.name              = "es9"
+            node.description       = "ES9 Source"
+            media.class            = "Audio/Source"
+            api.alsa.path          = "plughw:ES9"
+            api.alsa.period-size   = 1024
+            api.alsa.headroom      = 0
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S32_LE"
+            audio.rate             = 48000
+            audio.channels         = 16
+            #audio.position         = "FL,FR,RL,RR"
+        }
+    }
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.sink
+            node.name              = "es9"
+            node.description       = "ES9 Sink"
+            media.class            = "Audio/Sink"
+            api.alsa.path          = "plughw:ES9"
+            api.alsa.period-size   = 1024
+            api.alsa.headroom      = 0
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S32_LE"
+            audio.rate             = 48000
+            audio.channels         = 16
+            #audio.position         = "FL,FR,RL,RR"
+        }
+    }
+EOL
+
+cat > /home/alarm/aes67-linux-daemon/daemon/daemon.conf << 'EOL'
+{
+  "http_port": 8080,
+  "rtsp_port": 8854,
+  "http_base_dir": "../webui/dist",
+  "log_severity": 2,
+  "playout_delay": 0,
+  "tic_frame_size_at_1fs": 64,
+  "max_tic_frame_size": 1024,
+  "sample_rate": 48000,
+  "rtp_mcast_base": "239.1.0.1",
+  "rtp_port": 5004,
+  "ptp_domain": 0,
+  "ptp_dscp": 48,
+  "sap_mcast_addr": "239.255.255.255",
+  "sap_interval": 30,
+  "syslog_proto": "none",
+  "syslog_server": "255.255.255.254:1234",
+  "status_file": "./status.json",
+  "mdns_enabled": true,
+  "interface_name": "eth0"
+}
+EOL
+
+cat > /home/alarm/aes67-linux-daemon/daemon/status.json << EOL
+{
+  "sources": [
+    {
+      "id": 0,
+      "enabled": true,
+      "name": "Synth Source",
+      "io": "Audio Device",
+      "max_samples_per_packet": 48,
+      "codec": "L24",
+      "address": "239.1.0.1",
+      "ttl": 15,
+      "payload_type": 98,
+      "dscp": 34,
+      "refclk_ptp_traceable": false,
+      "map": [ 0, 1, 2, 3 ]
+    }
+  ],
+  "sinks": [
+    {
+      "id": 0,
+      "name": "Synth Sink",
+      "io": "Audio Device",
+      "use_sdp": true,
+      "source": "http://${IP}:8080/api/source/sdp/0",
+      "sdp": "v=0\no=- 711797 711798 IN IP4 ${IP}\ns=AES67 daemon ${IP_HEX} Synth Source\nc=IN IP4 239.1.0.1/15\nt=0 0\na=clock-domain:PTPv2 0\nm=audio 5004 RTP/AVP 98\nc=IN IP4 239.1.0.1/15\na=rtpmap:98 L24/48000/4\na=sync-time:0\na=framecount:48\na=ptime:1\na=mediaclk:direct=0\na=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\na=recvonly\n",
+      "delay": 384,
+      "ignore_refclk_gmid": true,
+      "map": [ 0, 1, 2, 3 ]
+    }
+  ]
+}
+EOL
+EOT
+
+chmod +x /home/alarm/link.sh /home/alarm/unlink.sh
+
+su alarm -c 'cp /usr/share/pipewire/pipewire.conf /home/alarm/.config/pipewire'
+sed -i -e '/context.objects = \[/r /home/alarm/factories.conf' /home/alarm/.config/pipewire/pipewire.conf
+
+# FIXME: Not sure if this is necessary
+systemctl set-default multi-user.target
+
+# Without linger, aes67 service will not start before user logs in
+mkdir -p /var/lib/systemd/linger
+touch /var/lib/systemd/linger/alarm
+
+systemctl enable avahi-daemon
+
+su alarm -c 'systemctl --user enable aes67 es9'
+
+#############################################
+# Cleanup and setting read-only file system #
+#############################################
+
+# Remove unneeded locales
+shopt -s extglob
+rm -rvf /usr/share/locale/!(en_US|locale.alias)
+
+# Restore DNS conf
+# FIXME: This throws "Device or resource busy" error
+# mv /etc/resolv.conf.tmp /etc/resolv.conf
+
+# Remove unneeded packages
+# boost is still needed as a linked library for the aes67 daemon, so don't remove it
+pacman -Rsu --noconfirm \
+	linux-aarch64-headers \
+	base-devel \
+	cmake \
+	clang \
+	git \
+	wget \
+	uboot-tools
+
+# Clear Pacman cache:
+pacman -Sc --noconfirm
+
+# Clear history:
+history -c -w
+
+# Disable system log to SD card:
+echo "Storage=none" >> /etc/systemd/journald.conf
+
+# Write log and tmp to ram disk:
+cat >> /etc/fstab << 'EOL'
+tmpfs	/var/log	tmpfs	nodev,nosuid	0	0
+tmpfs	/var/tmp	tmpfs	nodev,nosuid	0	0
+EOL
+
+# Set root partition to read-only:
+sed -i 's/ rw / ro /g' /boot/boot.txt
+
+# Compile boot.txt
+cd /boot && ./mkscr && cd -
+
+# Disable loading and saving the system random seed at boot and shutdown
+systemctl disable systemd-random-seed

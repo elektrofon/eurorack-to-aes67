@@ -1,0 +1,86 @@
+#!/bin/bash -xe
+
+IMAGE_NAME="eurorack-to-aes67-rpi4"
+ARCH_LINUX_TARBALL="ArchLinuxARM-rpi-aarch64-latest.tar.gz"
+
+cd /home/vagrant
+
+# Clean up existing build
+echo "[ STARTED  ] Cleaning up existing build"
+sudo rm -Rf tmp
+mkdir tmp
+cd tmp
+echo "[ FINISHED ] Cleaning up existing build"
+
+# Create empty image file
+echo "[ STARTED  ] Creating empty image file"
+
+fallocate -l 8G "${IMAGE_NAME}.img"
+DRIVE=$(sudo losetup --partscan --find --show "${IMAGE_NAME}.img")
+echo "[ FINISHED ] Creating empty image file"
+
+# Partition
+echo "[ STARTED  ] Partinioning"
+sudo parted --script ${DRIVE} mklabel msdos
+sudo parted --script ${DRIVE} mkpart primary fat32 0% 200M
+sudo parted --script ${DRIVE} mkpart primary ext4 200M 100%
+echo "[ FINISHED ] Partinioning"
+
+# Format
+echo "[ STARTED  ] Formatting"
+sudo mkfs.vfat -F32 ${DRIVE}p1
+sudo mkfs.ext4 -F ${DRIVE}p2
+echo "[ FINISHED ] Formatting"
+
+# Mount partitions
+echo "[ STARTED  ] Mounting partitions"
+sudo mount ${DRIVE}p2 /mnt
+sudo mkdir /mnt/boot
+sudo mount ${DRIVE}p1 /mnt/boot
+echo "[ FINISHED ] mounting partitions"
+
+# Download Arch Linux ARM
+echo "[ STARTED  ] Downloading Arch Linux ARM"
+wget http://os.archlinuxarm.org/os/${ARCH_LINUX_TARBALL}
+echo "[ FINISHED ] Downloading Arch Linux ARM"
+
+# Extract Arch Linux ARM to /mnt
+echo "[ STARTED  ] Extracting Arch Linux ARM"
+sudo tar -xpf "${ARCH_LINUX_TARBALL}" -C /mnt
+sudo sed -i 's/mmcblk0/mmcblk1/g' /mnt/etc/fstab
+echo "[ FINISHED ] Extracting Arch Linux ARM"
+
+# Enable ARM execution on x86_64
+echo "[ STARTED  ] Enabling ARM execution on x86_64"
+sudo cp /usr/bin/qemu-aarch64-static /mnt/usr/bin
+echo "[ FINISHED ] Enabling ARM execution on x86_64"
+
+# Copy host files to Arch Linux ARM
+echo "[ STARTED  ] Copying host files to Arch Linux ARM"
+sudo cp /vagrant/build /mnt/usr/bin
+sudo rsync -a --exclude='.git' --exclude='release' /vagrant/ /mnt/vagrant
+echo "[ FINISHED ] Copying host files to Arch Linux ARM"
+
+# Chroot into Arch Linux ARM
+echo "[ STARTED  ] Building Arch Linux ARM"
+sudo systemd-nspawn -D /mnt usr/bin/build
+echo "[ FINISHED ] Building Arch Linux ARM"
+
+# Cleanup
+echo "[ STARTED  ] Cleaning up"
+sudo umount /mnt/boot
+sudo umount /mnt
+sudo losetup --detach "${DRIVE}"
+echo "[ FINISHED ] Cleaning up"
+
+# Shrink image
+echo "[ STARTED  ] Shrinking image"
+cd /home/vagrant/tmp
+sudo pishrink.sh -s "${IMAGE_NAME}.img"
+echo "[ FINISHED ] Shrinking image"
+
+# Copy image to build directory
+echo "[ STARTED  ] Copying image to release directory"
+mkdir -p /vagrant/release
+cp "${IMAGE_NAME}.img" /vagrant/release
+echo "[ FINISHED ] Copying image to release directory"
