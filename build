@@ -58,7 +58,7 @@ mkdir -p /home/alarm/.config/systemd/user/pipewire.service.d
 mkdir -p /home/alarm/.config/pipewire
 chown -R alarm:alarm /home/alarm/.config
 
-git clone --depth 1 --branch master https://github.com/elektrofon/aes67-linux-daemon.git /home/alarm/aes67-linux-daemon
+git clone --depth 1 --branch eurorack-to-aes67 https://github.com/elektrofon/aes67-linux-daemon.git /home/alarm/aes67-linux-daemon
 
 # Patch Ravanne driver Makefile to get the right kernel headers
 cd /home/alarm/aes67-linux-daemon/3rdparty
@@ -355,7 +355,7 @@ cat > /home/alarm/aes67-linux-daemon/daemon/status.json << EOL
       "io": "Audio Device",
       "use_sdp": true,
       "source": "http://${IP}:8080/api/source/sdp/0",
-      "sdp": "v=0\no=- 711797 711798 IN IP4 ${IP}\ns=AES67 daemon ${IP_HEX} Synth Source\nc=IN IP4 239.1.0.1/15\nt=0 0\na=clock-domain:PTPv2 0\nm=audio 5004 RTP/AVP 98\nc=IN IP4 239.1.0.1/15\na=rtpmap:98 L24/48000/4\na=sync-time:0\na=framecount:48\na=ptime:1\na=mediaclk:direct=0\na=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\na=recvonly\n",
+      "sdp": "v=0\no=- 711797 711798 IN IP4 ${IP}\ns=Synth ${IP_HEX} Synth Source\nc=IN IP4 239.1.0.1/15\nt=0 0\na=clock-domain:PTPv2 0\nm=audio 5004 RTP/AVP 98\nc=IN IP4 239.1.0.1/15\na=rtpmap:98 L24/48000/4\na=sync-time:0\na=framecount:48\na=ptime:1\na=mediaclk:direct=0\na=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\na=recvonly\n",
       "delay": 384,
       "ignore_refclk_gmid": true,
       "map": [ 0, 1, 2, 3 ]
