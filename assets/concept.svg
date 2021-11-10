@@ -1,6 +1,25 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 <svg width="100%" height="100%" viewBox="0 0 1920 1080" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:1.5;">
+     <style>
+        *[style*="stroke:rgb"] {
+            stroke: #000 !important;
+        }
+
+		*[style*="fill:rgb"] {
+			fill: #000 !important;
+		}
+
+        @media (prefers-color-scheme: dark) {
+			*[style*="stroke:rgb"] {
+                stroke: #fff !important;
+            }
+
+			*[style*="fill:rgb"] {
+                fill: #fff !important;
+            }
+        }
+    </style>
     <g transform="matrix(6.12323e-17,-1,1,6.12323e-17,945.902,770.655)">
         <g id="Outline" transform="matrix(1.39394e-15,22.7648,-14.1451,8.66138e-16,5020.96,-15779.7)">
             <path d="M684.044,319.669L684.044,303.428C684.044,303.35 684.005,303.287 683.956,303.287L656.809,303.287C656.76,303.287 656.721,303.35 656.721,303.428L656.721,372.906C656.721,372.984 656.76,373.048 656.809,373.048L683.956,373.048C684.005,373.048 684.044,372.984 684.044,372.906L684.044,321.205" style="fill:none;stroke:rgb(9,105,218);stroke-width:0.16px;"/>
