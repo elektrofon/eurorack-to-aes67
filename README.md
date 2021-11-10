@@ -24,3 +24,11 @@ The AES67 source and sink is set up to run at 48kHz sample rate in the L24 forma
 ```bash
 $ vagrant up && vagrant ssh -c "/vagrant/vagrant-build"
 ```
+
+<br/>
+<br/>
+<br/>
+
+*Disclaimer:*
+---
+**This project is not developed or supported by Expert Sleepers in any way.**
