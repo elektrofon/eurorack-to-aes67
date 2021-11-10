@@ -2,7 +2,7 @@
 
 ![Concept](/assets/concept.svg?raw=true)
 
-Turn your [Expert Sleepers ES-9](https://www.expert-sleepers.co.uk/es9.html) into a AES67/RAVENNA network audio interface with a Raspberry PI 4.
+Turn your [Expert Sleepers ES-9](https://www.expert-sleepers.co.uk/es9.html) and [Raspberry Pi 4](https://www.raspberrypi.com/products/raspberry-pi-4-model-b/) into a AES67/RAVENNA network audio interface.
 
 ## Install
 
