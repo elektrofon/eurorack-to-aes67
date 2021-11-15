@@ -58,6 +58,14 @@ mkdir -p /home/alarm/.config/systemd/user/pipewire.service.d
 mkdir -p /home/alarm/.config/pipewire
 chown -R alarm:alarm /home/alarm/.config
 
+# Build channel-count
+git clone --depth 1 --branch main https://github.com/elektrofon/channel-count.git /home/alarm/channel-count
+
+cd /home/alarm/channel-count
+make
+make install
+
+# Build aes67-linux-daemon
 git clone --depth 1 --branch eurorack-to-aes67 https://github.com/elektrofon/aes67-linux-daemon.git /home/alarm/aes67-linux-daemon
 
 # Patch Ravanne driver Makefile to get the right kernel headers
@@ -95,9 +103,6 @@ cp /home/alarm/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm/driver/MergingRavenn
 
 depmod `pacman -Q 'linux-aarch64-headers' | sed 's/.* //'`-ARCH
 
-# Insmod is not needed right?
-# insmod /home/alarm/aes67-linux-daemon/3rdparty/ravenna-alsa-lkm/driver/MergingRavennaALSA.ko
-
 # Instead of `sysctl -w net/ipv4/igmp_max_memberships=66` call (not working under `systemd-nspawn`):
 echo "net.ipv4.igmp_max_memberships = 66" > /etc/sysctl.d/99-sysctl.conf
 
@@ -105,89 +110,178 @@ echo "MergingRavennaALSA" > /etc/modules-load.d/MergingRavennaALSA.conf
 
 chown -R alarm:alarm /home/alarm/aes67-linux-daemon
 
-# This is not necessary, but an example of how to tag a USB device so that it shows up as in `/dev/` and systemd with a custom name
-# cat > /etc/udev/rules.d/es9.rules << 'EOL'
-# SUBSYSTEM=="usb", ENV{ID_MODEL}=="ES-9", SYMLINK+="es9", TAG+="systemd"
-# EOL
+cat > /etc/udev/rules.d/usb-sound.rules << 'EOL'
+ACTION=="add", SUBSYSTEM=="sound", SUBSYSTEMS=="usb", ENV{ID_TYPE}=="audio", SYMLINK+="usb-sound", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="usb-to-aes67@%E{ID_MODEL}.service"
+EOL
 
 su alarm << 'EOT'
-cat > /home/alarm/link.sh << 'EOL'
-#!/bin/bash
-
-IN0="ravenna:playback_FL"
-IN1="ravenna:playback_FR"
-IN2="ravenna:playback_RL"
-IN3="ravenna:playback_RR"
-
-OUT0="es9:capture_1"
-OUT1="es9:capture_2"
-OUT2="es9:capture_3"
-OUT3="es9:capture_4"
-
-# Wait for AES67 daemon to lock
-IP=$(ip -4 address show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-
-until /usr/bin/curl http://${IP}:8080/api/ptp/status | grep \"locked\"; do
-        sleep 1
-done
-
-until /usr/bin/pw-link "${OUT0}" "${IN0}"; do
-	sleep .5
-done
-
-until /usr/bin/pw-link "${OUT1}" "${IN1}"; do
-	sleep .5
-done
-
-until /usr/bin/pw-link "${OUT2}" "${IN2}"; do
-	sleep .5
-done
-
-until /usr/bin/pw-link "${OUT3}" "${IN3}"; do
-	sleep .5
-done
-EOL
-
-cat > /home/alarm/unlink.sh << 'EOL'
-#!/bin/bash
-
-IN0="ravenna:playback_FL"
-IN1="ravenna:playback_FR"
-IN2="ravenna:playback_RL"
-IN3="ravenna:playback_RR"
-
-OUT0="es9:capture_1"
-OUT1="es9:capture_2"
-OUT2="es9:capture_3"
-OUT3="es9:capture_4"
-
-pw-link -d "${OUT0}" "${IN0}"
-pw-link -d "${OUT1}" "${IN1}"
-pw-link -d "${OUT2}" "${IN2}"
-pw-link -d "${OUT3}" "${IN3}"
-EOL
-
 cat > /home/alarm/.asoundrc << 'EOL'
 pcm.hw {
 	rate 48000
 }
 EOL
 
-cat > /home/alarm/.config/systemd/user/es9.service << 'EOL'
+cat > /home/alarm/start.sh << 'EOL'
+#!/bin/bash
+
+# If device argument is not provided, fall back to systemd listing
+DEVICE=$(systemctl --type=device --all | gawk '/dev-usb/ {print $5}')
+if [ $# -gt 0 ]
+then
+    DEVICE=$1
+fi
+
+# Wait for AES67 daemon PTP to lock
+IP=$(ip -4 address show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+until /usr/bin/curl http://${IP}:8080/api/ptp/status | grep \"locked\"; do
+    sleep 1
+done
+
+# Ensure pipewire is stopped
+systemctl --user stop pipewire wireplumber
+
+# Get ALSA device name and channel counts
+RESULT=$(channel-count -U $DEVICE)
+DEVICE=$(echo "$RESULT" | awk '/Device:/ {print $2}')
+INPUTS=$(echo "$RESULT" | awk '/Inputs:/ {print $2}')
+OUTPUTS=$(echo "$RESULT" | awk '/Outputs:/ {print $2}')
+
+# Create default config for pipewire
+CONFIG=$(
+cat << EOS
+    #default.clock.quantum       = 64
+    default.clock.min-quantum   = 64
+    #default.clock.max-quantum   = 1024
+EOS
+)
+
+# Create sinks and sources config for pipewire
+FACTORIES=$(
+cat << EOS
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.sink
+            node.name              = "ravenna"
+            node.description       = "RAVENNA Sink"
+            media.class            = "Audio/Sink"
+            api.alsa.path          = "hw:RAVENNA"
+            api.alsa.period-size   = 128
+            api.alsa.headroom      = 0
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S24_3LE"
+            audio.rate             = 48000
+            audio.channels         = ${INPUTS}
+        }
+    }
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.source
+            node.name              = "ravenna"
+            node.description       = "RAVENNA Source"
+            media.class            = "Audio/Source"
+            api.alsa.path          = "hw:RAVENNA"
+            api.alsa.period-size   = 128
+            api.alsa.headroom      = 0
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S24_3LE"
+            audio.rate             = 48000
+            audio.channels         = ${OUTPUTS}
+        }
+    }
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.sink
+            node.name              = "usb"
+            node.description       = "USB Sink"
+            media.class            = "Audio/Sink"
+            api.alsa.path          = "${DEVICE}"
+            api.alsa.period-size   = 1024
+            api.alsa.headroom      = 0
+            latency.internal.rate  = 256
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S24_LE"
+            audio.rate             = 48000
+            audio.channels         = ${INPUTS}
+        }
+    }
+    { factory = adapter
+        args = {
+            factory.name           = api.alsa.pcm.source
+            node.name              = "usb"
+            node.description       = "USB Source"
+            media.class            = "Audio/Source"
+            api.alsa.path          = "${DEVICE}"
+            api.alsa.period-size   = 1024
+            api.alsa.headroom      = 0
+            latency.internal.rate  = 256
+            api.alsa.disable-mmap  = false
+            api.alsa.disable-batch = false
+            audio.format           = "S24_LE"
+            audio.rate             = 48000
+            audio.channels         = ${OUTPUTS}
+        }
+    }
+EOS
+)
+
+cp /usr/share/pipewire/pipewire.conf /home/alarm/
+awk -v config="$CONFIG" '/context\.properties = \{/ {print;print config;next}1' /usr/share/pipewire/pipewire.conf > /home/alarm/pipewire.conf
+awk -v factories="$FACTORIES" '/context\.objects = \[/ {print;print factories;next}1' /home/alarm/pipewire.conf > /home/alarm/.config/pipewire/pipewire.conf
+
+# Start pipewire
+systemctl --user start pipewire wireplumber
+
+# Link devices (max 8 inputs and outputs, ref `clock.min-quantum` in pipewire.conf)
+MAX_INPUTS_LINKS=$(($INPUTS  < 8 ? $INPUTS : 8))
+MAX_OUTPUT_LINKS=$(($OUTPUTS  < 8 ? $OUTPUTS : 8))
+
+for i in $(seq 1 $MAX_INPUT_LINKS)
+do
+    echo "Trying to link usb:capture_${i} and ravenna:playback_${i}"
+    until /usr/bin/pw-link "usb:capture_${i}" "ravenna:playback_${i}"; do
+        sleep .5
+    done
+done
+
+for i in $(seq 1 $MAX_OUTPUT_LINKS)
+do
+    echo "Trying to link ravenna:capture_${i} and usb:playback_${i}"
+    until /usr/bin/pw-link "ravenna:capture_${i}" "usb:playback_${i}"; do
+        sleep .5
+    done
+done
+EOL
+
+cat > /home/alarm/.config/systemd/user/boot.service << 'EOL'
 [Unit]
-Description=ES9 link service
+Description=Boot service
 After=aes67.service
-After=pipewire.service
-After=wireplumber.service
-After=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-After=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+After=dev-usb\x2dsound.device
 Requires=aes67.service
-Requires=pipewire.service
-Requires=wireplumber.service
-Requisite=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-Requisite=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
-BindsTo=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-BindsTo=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+Requisite=dev-usb\x2dsound.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/home/alarm/start.sh
+
+[Install]
+WantedBy=aes67.service
+WantedBy=dev-usb\x2dsound.device
+EOL
+
+cat > /home/alarm/.config/systemd/user/usb-to-aes67@.service << 'EOL'
+[Unit]
+Description=Create config service
+After=aes67.service
+After=dev-usb\x2dsound.device
+Requires=aes67.service
+Requisite=dev-usb\x2dsound.device
+BindsTo=dev-usb\x2dsound.device
 PropagatesStopTo=pipewire.service wireplumber.service pipewire.socket
 
 [Service]
@@ -196,16 +290,12 @@ Type=oneshot
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=1
-ExecStart=/home/alarm/link.sh
-ExecStop=/home/alarm/unlink.sh
+ExecStart=/home/alarm/start.sh %i
 StandardOutput=journal
 
 [Install]
 WantedBy=aes67.service
-WantedBy=pipewire.service
-WantedBy=wireplumber.service
-WantedBy=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-WantedBy=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
+WantedBy=dev-usb\x2dsound.device
 EOL
 
 cat > /home/alarm/.config/systemd/user/aes67.service << 'EOL'
@@ -224,92 +314,6 @@ ExecStartPost=/bin/sleep 5
 
 [Install]
 WantedBy=default.target
-EOL
-
-cat > /home/alarm/.config/systemd/user/pipewire.service.d/override.conf << 'EOL'
-[Unit]
-After=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-After=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
-After=aes67.service
-Requires=aes67.service
-Requisite=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-Requisite=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
-
-[Install]
-WantedBy=aes67.service
-WantedBy=dev-snd-by\x2did-usb\x2dExpert_Sleepers_Ltd_ES\x2d9\x2d01.device
-WantedBy=dev-snd-by\x2dpath-platform\x2dsnd_merging_rav.0.device
-EOL
-
-cat > /home/alarm/factories.conf  << 'EOL'
-    { factory = adapter
-        args = {
-            factory.name           = api.alsa.pcm.source
-            node.name              = "ravenna"
-            node.description       = "RAVENNA Source"
-            media.class            = "Audio/Source"
-            api.alsa.path          = "plughw:RAVENNA"
-            api.alsa.period-size   = 1024
-            api.alsa.headroom      = 0
-            api.alsa.disable-mmap  = false
-            api.alsa.disable-batch = false
-            audio.format           = "S24_3LE"
-            audio.rate             = 48000
-            audio.channels         = 4
-            audio.position         = "FL,FR,RL,RR"
-        }
-    }
-    { factory = adapter
-        args = {
-            factory.name           = api.alsa.pcm.sink
-            node.name              = "ravenna"
-            node.description       = "RAVENNA Sink"
-            media.class            = "Audio/Sink"
-            api.alsa.path          = "plughw:RAVENNA"
-            api.alsa.period-size   = 1024
-            api.alsa.headroom      = 0
-            api.alsa.disable-mmap  = false
-            api.alsa.disable-batch = false
-            audio.format           = "S24_3LE"
-            audio.rate             = 48000
-            audio.channels         = 4
-            audio.position         = "FL,FR,RL,RR"
-        }
-    }
-    { factory = adapter
-        args = {
-            factory.name           = api.alsa.pcm.source
-            node.name              = "es9"
-            node.description       = "ES9 Source"
-            media.class            = "Audio/Source"
-            api.alsa.path          = "plughw:ES9"
-            api.alsa.period-size   = 1024
-            api.alsa.headroom      = 0
-            api.alsa.disable-mmap  = false
-            api.alsa.disable-batch = false
-            audio.format           = "S24_LE"
-            audio.rate             = 48000
-            audio.channels         = 16
-            #audio.position         = "FL,FR,RL,RR"
-        }
-    }
-    { factory = adapter
-        args = {
-            factory.name           = api.alsa.pcm.sink
-            node.name              = "es9"
-            node.description       = "ES9 Sink"
-            media.class            = "Audio/Sink"
-            api.alsa.path          = "plughw:ES9"
-            api.alsa.period-size   = 1024
-            api.alsa.headroom      = 0
-            api.alsa.disable-mmap  = false
-            api.alsa.disable-batch = false
-            audio.format           = "S24_LE"
-            audio.rate             = 48000
-            audio.channels         = 16
-            #audio.position         = "FL,FR,RL,RR"
-        }
-    }
 EOL
 
 cat > /home/alarm/aes67-linux-daemon/daemon/daemon.conf << 'EOL'
@@ -351,30 +355,16 @@ cat > /home/alarm/aes67-linux-daemon/daemon/status.json << EOL
       "payload_type": 98,
       "dscp": 34,
       "refclk_ptp_traceable": false,
-      "map": [ 0, 1, 2, 3 ]
+      "map": [ 0, 1, 2, 3, 4, 5, 6, 7 ]
     }
   ],
   "sinks": [
-    {
-      "id": 0,
-      "name": "Sink",
-      "io": "Audio Device",
-      "use_sdp": true,
-      "source": "http://${IP}:8080/api/source/sdp/0",
-      "sdp": "v=0\no=- 711797 711798 IN IP4 ${IP}\ns=Synth ${IP_HEX} Source\nc=IN IP4 239.1.0.1/15\nt=0 0\na=clock-domain:PTPv2 0\nm=audio 5004 RTP/AVP 98\nc=IN IP4 239.1.0.1/15\na=rtpmap:98 L24/48000/4\na=sync-time:0\na=framecount:48\na=ptime:1\na=mediaclk:direct=0\na=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\na=recvonly\n",
-      "delay": 384,
-      "ignore_refclk_gmid": true,
-      "map": [ 0, 1, 2, 3 ]
-    }
   ]
 }
 EOL
 EOT
 
-chmod +x /home/alarm/link.sh /home/alarm/unlink.sh
-
-su alarm -c 'cp /usr/share/pipewire/pipewire.conf /home/alarm/.config/pipewire'
-sed -i -e '/context.objects = \[/r /home/alarm/factories.conf' /home/alarm/.config/pipewire/pipewire.conf
+chmod +x /home/alarm/start.sh
 
 # FIXME: Not sure if this is necessary
 systemctl set-default multi-user.target
@@ -385,7 +375,7 @@ touch /var/lib/systemd/linger/alarm
 
 systemctl enable avahi-daemon
 
-su alarm -c 'systemctl --user enable aes67 es9'
+su alarm -c 'systemctl --user enable aes67 boot'
 
 #############################################
 # Cleanup and setting read-only file system #
